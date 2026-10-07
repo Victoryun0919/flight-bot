@@ -1,163 +1,474 @@
 # PTIS Personal Template
 
 PTIS finds discounted Google Flights fares with SerpAPI, publishes a GitHub Pages
-report, and can send the summary to your own KakaoTalk "My Chatroom". This is a
-personal template: each installation uses its own GitHub repository, SerpAPI key,
-and Kakao Developers app.
+report, and can send the summary to your own KakaoTalk "My Chatroom". Each personal
+installation uses its own GitHub repository, SerpAPI key, and Kakao Developers app.
 
 ## What stays private
 
-`data/kakao_auth.json` contains an encrypted Kakao refresh token and is committed
-to your repository so GitHub Actions can retain refresh-token rotations. It cannot
-be decrypted without the `KAKAO_TOKEN_ENCRYPTION_KEY` GitHub secret. Do not commit
-that secret, your Kakao client secret, or a plaintext refresh token. Restrict write
-access to the repository because writers can alter a workflow that reads secrets.
+`data/kakao_auth.json` contains only an encrypted Kakao refresh token. GitHub Actions
+can decrypt it only with the repository's `KAKAO_TOKEN_ENCRYPTION_KEY` secret. Never
+commit that encryption key, the Kakao Client Secret, a plaintext refresh token, or
+other API keys. Restrict repository write access because a writer can change a
+workflow that reads repository secrets.
 
-## Recommended: guided setup in about 10 minutes
+## Recommended guided setup
 
-Use this path when installing PTIS for one person. It registers the required
-GitHub Actions secrets, opens Kakao OAuth, commits only the encrypted refresh
-token, and can run the real My Chatroom verification in one guided session.
+### Windows
+
+After creating your repository with **Use this template** and cloning it, open
+PowerShell in the repository folder and run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\setup_windows.ps1
+```
+
+The bootstrap checks Python 3.11+, Git, and GitHub CLI. It repairs the current
+PowerShell PATH for the standard Git and GitHub CLI install locations when those
+programs are already installed. If a prerequisite is actually missing, it prints
+the official `winget` command instead of silently installing software. It also runs
+`gh auth login` when needed, installs `requirements.txt`, and starts the guided
+installer.
+
+### macOS / Linux / already-prepared Windows
 
 Prerequisites:
 
 - Python 3.11 or newer
 - Git
-- [GitHub CLI](https://cli.github.com/) signed in with `gh auth login`
-- A clean local clone made from this template
+- [GitHub CLI](https://cli.github.com/) authenticated with `gh auth login`
+- a clean local clone created from the PTIS template
 
-First create your repository with **Use this template**, clone it, and run:
+Run:
 
 ```bash
 python -m pip install -r requirements.txt
 python install_ptis.py
 ```
 
-The assistant shows the exact Kakao Redirect URI and Pages domain for your
-GitHub account. After you finish the Kakao Developers settings, it asks for the
-SerpAPI key, Kakao REST API key, and Kakao Login Client Secret using hidden
-prompts. Secret values are kept in process memory, passed to `gh secret set`
-through standard input, and are never written to a plaintext config file or
-included in command-line arguments.
+For read-only diagnostics at any time:
 
-You personally approve Kakao access once in the browser. The assistant then:
+```bash
+python install_ptis.py --doctor
+```
 
-1. creates a fresh token-encryption key and saves all required repository secrets;
-2. obtains and encrypts the Kakao Refresh Token;
-3. commits and pushes only `data/kakao_auth.json`;
-4. opens the GitHub Pages setting;
-5. optionally runs **Kakao Setup Verification** and waits for its result.
+The doctor checks Python/Git/GitHub CLI readiness, GitHub authentication, the
+repository remote, working-tree state, Git commit identity presence, required
+repository Secret names, encrypted Kakao auth file presence, Pages status, and the
+latest Kakao verification status. It does not print secret values.
 
-If the template copy initially contains an unreadable `data/kakao_auth.json`, that
-is expected: it was encrypted for a different installation. The assistant replaces
-it using a new encryption key unique to your repository.
+## What the guided installer does
 
-GitHub and Kakao intentionally require their own login/consent steps, so those
-buttons cannot be bypassed safely. Everything between those required approvals is
-handled by the assistant.
+Before asking for secrets, the installer performs a preflight check and configures
+missing **repository-local** Git author settings from the authenticated GitHub
+account. It uses GitHub's ID-based `noreply` commit address, so a fresh PC does not
+need manual `git config user.email` setup.
+
+A GitHub template snapshot can contain runtime history from the source instance.
+For a new personal installation the installer detects meaningful history in
+`data/state.json` and asks to reset it before proceeding. This gives the new user
+an independent 30-day price history, exposure log, carryover state, and monthly API
+budget. When deliberately reconfiguring an existing installation, run:
+
+```bash
+python install_ptis.py --preserve-state
+```
+
+After preflight, configure the Kakao Developers app with the values printed by the
+installer. The fixed local Redirect URI is:
+
+```text
+http://127.0.0.1:8765/callback
+```
+
+The installer then asks through hidden prompts for:
+
+- SerpAPI key
+- Kakao REST API key
+- Kakao Login Client Secret
+
+It creates the token-encryption key itself. Secret values remain in process memory
+and are never placed in command-line arguments or a plaintext config file.
+
+The setup order is transactional:
+
+1. perform local Kakao OAuth and verify `talk_message`;
+2. if OAuth fails, retry with the same Kakao values or replace only the Kakao values
+   without re-entering the SerpAPI key;
+3. after OAuth succeeds, save the four required GitHub Actions secrets;
+4. commit and push the new installation state and encrypted refresh token;
+5. check/open GitHub Pages settings when Pages is not yet enabled;
+6. optionally run **Kakao Setup Verification** and wait for the real My Chatroom
+   delivery result;
+7. print a final status summary containing only verified/observed states.
+
+If setup stops before the setup commit is successfully pushed, installer-generated
+changes to the state/auth files are rolled back so a retry starts from a clean
+repository.
+
+## Kakao Developers settings
+
+Create a Kakao Developers app for the person who will receive messages, then:
+
+1. Enable **Kakao Login**.
+2. Register `http://127.0.0.1:8765/callback` as the Redirect URI.
+3. Enable the `talk_message` consent item.
+4. Enable the Kakao Login Client Secret for the REST API key.
+5. Under Product Link Management, register both the Pages web domain printed by
+   the installer (normally `https://YOUR_GITHUB_OWNER.github.io`) and
+   `https://github.com`. The second domain is required for the Kakao
+   **여행 조건 설정** button to open the GitHub-hosted settings form.
+
+The OAuth browser consent must be completed while signed into the Kakao account
+that should receive PTIS messages.
 
 ## Manual setup fallback
 
-Use the steps below if GitHub CLI is unavailable or if you prefer to configure
-each item yourself.
+Use this only when GitHub CLI is unavailable or you prefer to configure everything
+manually.
 
-1. Click **Use this template** on GitHub and create your own repository. Keep the
-   default branch as `main`. Enable GitHub Pages with **GitHub Actions** as its
-   source in **Settings > Pages**.
-2. Create a SerpAPI account and copy its API key.
-3. In [Kakao Developers](https://developers.kakao.com/), create an app, enable
-   **Kakao Login**, and register this exact Redirect URI under Kakao Login:
-   `http://127.0.0.1:8765/callback`.
-4. Under **Product Link Management**, register your Pages web domain:
-   `https://YOUR_GITHUB_OWNER.github.io`. In **Consent Items**, enable
-   **KakaoTalk Message (`talk_message`)**. Copy the REST API key and Client Secret.
-   Client Secret is normally enabled by default for new REST API keys.
-5. In your repository's **Settings > Secrets and variables > Actions**, add:
+1. Enable GitHub Pages with **GitHub Actions** as its source in repository Settings.
+2. Create a SerpAPI account and obtain its API key.
+3. Configure the Kakao Developers app as described above.
+4. Add these repository Actions secrets:
 
    | Secret | Required | Value |
    | --- | --- | --- |
    | `SERPAPI_KEY` | Yes | Your SerpAPI key |
    | `KAKAO_REST_API_KEY` | For Kakao | Kakao REST API key |
-   | `KAKAO_CLIENT_SECRET` | Recommended | Kakao Client Secret; required when it is enabled in Kakao Developers |
-   | `KAKAO_TOKEN_ENCRYPTION_KEY` | For Kakao | A new key generated in step 6 |
-   | `KAKAO_JS_KEY` | Optional | Kakao JavaScript key for the report's share button |
-   | `GMAIL_USER` / `GMAIL_PASSWORD` | Optional | Gmail address and app password for email notifications |
+   | `KAKAO_CLIENT_SECRET` | For Kakao | Client Secret paired with that REST API key |
+   | `KAKAO_TOKEN_ENCRYPTION_KEY` | For Kakao | Fresh Fernet key generated below |
+   | `KAKAO_JS_KEY` | Optional | Kakao JavaScript key for report sharing |
+   | `GMAIL_USER` / `GMAIL_PASSWORD` | Optional | Gmail address and app password |
 
-6. Clone your new repository locally, install dependencies, and generate a fresh
-   encryption key. Store that printed value as `KAKAO_TOKEN_ENCRYPTION_KEY` before
-   continuing.
+5. Generate the encryption key:
 
    ```bash
-   python -m pip install -r requirements.txt
    python setup_kakao.py --print-encryption-key
    ```
 
-7. Set the following local environment variables, then run the OAuth setup. The
-   browser opens a Kakao consent page. Sign in and grant **KakaoTalk Message**.
-   The script verifies that `talk_message` was granted and creates only the
-   encrypted `data/kakao_auth.json` file.
+6. Set `KAKAO_REST_API_KEY`, `KAKAO_CLIENT_SECRET`,
+   `KAKAO_TOKEN_ENCRYPTION_KEY`, and
+   `KAKAO_REDIRECT_URI=http://127.0.0.1:8765/callback` in the local shell, then run:
 
    ```bash
-   KAKAO_REST_API_KEY=your-rest-key
-   KAKAO_CLIENT_SECRET=your-client-secret
-   KAKAO_TOKEN_ENCRYPTION_KEY=the-key-from-step-6
-   KAKAO_REDIRECT_URI=http://127.0.0.1:8765/callback
    python setup_kakao.py
    ```
 
-   In PowerShell, set each value with `$env:NAME = 'value'` before the command.
-   Never put the values into a committed `.env` file.
-
-8. Commit and push the encrypted token file, then run **Kakao Setup Verification**
-   from the repository's **Actions** tab. A successful run sends one test message
-   to your KakaoTalk My Chatroom. This is the required proof path before relying on
-   the daily workflow.
-
-   ```bash
-   git add data/kakao_auth.json
-   git commit -m "Configure Kakao OAuth"
-   git push
-   ```
-
-9. Run **Daily Flight Deal Scraper** manually once. It publishes the Pages report
-   and thereafter runs at 07:00 KST. Gmail remains optional; leave its two secrets
-   empty to use Kakao and Pages only.
+7. Commit only the encrypted `data/kakao_auth.json`, then run **Kakao Setup
+   Verification** in Actions.
 
 ## Token rotation
 
-The daily workflow reads and decrypts `data/kakao_auth.json`, refreshes the access
-token, and immediately writes a newly returned refresh token back to that encrypted
-file before sending a message. The workflow commits this file together with its
-normal state update. Kakao currently returns a replacement refresh token only when
-the prior token has under one month remaining, so an absent replacement is normal.
+The daily workflow reads and decrypts `data/kakao_auth.json`, refreshes the Kakao
+access token, and persists a newly returned refresh token atomically before message
+delivery. The workflow commits that encrypted file together with normal runtime
+state updates when it changes.
 
 ## URLs and template behavior
 
 On GitHub Actions, the report URL is calculated as
-`https://OWNER.github.io/REPOSITORY/` from `GITHUB_REPOSITORY`, and the Kakao card
-image URL is calculated from the same repository plus the running commit SHA. No
-account name is embedded in the application code. For a custom domain or a local
-notification test, set `PTIS_PAGE_URL` and `PTIS_KAKAO_CARD_IMAGE_URL` explicitly.
+`https://OWNER.github.io/REPOSITORY/` from `GITHUB_REPOSITORY`. The Kakao card image
+URL is also derived from the running repository and revision. `PTIS_PAGE_URL` and
+`PTIS_KAKAO_CARD_IMAGE_URL` remain explicit overrides for a custom domain or local
+test.
 
-The current default message endpoint is `POST /v2/api/talk/memo/default/send`;
-it sends only to the user who completed OAuth.
-PTIS does not request the separate permission required for sending to friends.
+The Kakao delivery endpoint sends only to the OAuth user's own My Chatroom. PTIS
+does not request the separate friend-message permission.
+
+PTIS v1.6 builds a verified clean distribution from the upstream source. The
+artifact contains only centrally managed program files plus safe seed configuration
+and excludes runtime/auth files such as `data/state.json` and
+`data/kakao_auth.json`. The clean distribution repository is
+`kijm32-ops/flight-bot-template`; new installations should be created from that
+repository instead of copying the live upstream installation.
+
+## Clean template distribution
+
+The upstream source repository is also a live installation, so it must not be
+copied directly for new users. Build a clean distribution with:
+
+```bash
+python build_template.py --output ../ptis-template --zip ../ptis-template.zip
+```
+
+The builder uses `.ptis/update_manifest.json` as an allowlist. It includes
+centrally managed program files and seed-if-missing files, while refusing protected
+runtime/auth files. The generated artifact intentionally excludes:
+
+- `data/state.json`
+- `data/kakao_auth.json`
+- `TASK.md`
+- `CHECKPOINT.md`
+- generated Pages output, caches, virtualenvs, and Git metadata
+
+The **Build Clean PTIS Template** GitHub Actions workflow produces the same verified
+zip artifact without SerpAPI calls. The initialized
+`kijm32-ops/flight-bot-template` repository was smoke-tested with the bundled
+validation workflow. Keep GitHub's **Template repository** setting enabled there.
+Future PTIS program versions can reach that repository through the bundled
+review-only PTIS update workflow without copying upstream runtime state.
 
 ## Troubleshooting
 
-- `talk_message` missing: confirm the consent item is enabled, run OAuth setup
-  again, and grant consent in the browser.
-- `KOE` token error: confirm the REST API key, Client Secret setting, and matching
-  `KAKAO_TOKEN_ENCRYPTION_KEY`; repeat OAuth setup if the token was revoked.
-- Callback timeout: the registered URI and local `KAKAO_REDIRECT_URI` must exactly
-  match `http://127.0.0.1:8765/callback`, and port 8765 must be available.
-- No Kakao card image: make the repository public, or set
-  `PTIS_KAKAO_CARD_IMAGE_URL` to a publicly reachable image. Kakao fetches card
-  images itself.
+- **Installer says the repository is dirty immediately after start:** update to the
+  current template containing `.gitignore`, remove only generated cache directories
+  if present, then run `python install_ptis.py --doctor`.
+- **Kakao token HTTP 401:** the current setup script prints Kakao's safe
+  `error`/`error_description`/`error_code` fields when available. Verify the REST
+  API key and the Client Secret from the same REST key entry, and confirm the
+  Client Secret is enabled.
+- **Callback timeout:** the registered Redirect URI must exactly match
+  `http://127.0.0.1:8765/callback`, and local port 8765 must be available.
+- **Git commit identity:** guided setup configures this automatically only inside
+  the current repository. `--doctor` reports whether an identity is available.
+- **No Kakao card image:** the image URL must be publicly reachable by Kakao.
+- **Setup interrupted before commit:** rerun the installer. It rolls back the local
+  runtime/auth changes it generated before a successful setup commit.
+
+## Focus Search
+
+Focus Search adds one explicit user-intent search without increasing the normal
+monthly SerpAPI budget. When enabled, it replaces the lowest-priority daily
+`GMP/near` discovery task one-for-one. When disabled or expired, the original
+`GMP/near` task runs normally.
+
+Edit `user_config.json`:
+
+```json
+{
+  "focus_search": {
+    "enabled": true,
+    "origin": "ICN",
+    "region": "Japan",
+    "outbound_from": "2026-10-02",
+    "outbound_to": "2026-10-11",
+    "stay_min": 3,
+    "stay_max": 5,
+    "max_price": 250000
+  }
+}
+```
+
+Required when enabled: `origin`, `region`, `outbound_from`, and
+`outbound_to`. `stay_min` and `stay_max` are optional but must be supplied
+together. `max_price` is optional.
+
+The current Google Flights Deals API does not allow `query` and `trip_length`
+in the same request. PTIS therefore expresses a requested stay such as 3-5 days
+inside the region query while keeping the explicit outbound-date window. Focus
+results still pass PTIS normalization and price-safety gates, but they do not
+compete with discovery quota, carryover, or exposure demotion. They appear first
+in Kakao and in a separate Pages section. When Focus Search runs but returns zero
+deals, Pages and Kakao still show the active condition and a concise funnel status
+such as the number of candidates removed by the PTIS price cap.
+
+If the entire focus date window has passed, Focus Search is skipped automatically
+and the normal `GMP/near` discovery slot is restored. Invalid Focus settings also
+disable only Focus for that run; the discovery pipeline continues.
+
+## Multi Route Watch
+
+Route Watch monitors exact airport pairs and exact round-trip dates with the
+SerpAPI `google_flights` engine. Region Focus and every active Route Watch share
+one user-intent slot per KST day, so this feature adds no scheduled API calls.
+
+Example `user_config.json`:
+
+```json
+{
+  "focus_slot": {
+    "mode": "alternate"
+  },
+  "focus_search": {
+    "enabled": true,
+    "origin": "ICN",
+    "region": "Japan",
+    "outbound_from": "2026-10-02",
+    "outbound_to": "2026-10-11",
+    "stay_min": 3,
+    "stay_max": 5,
+    "max_price": 250000
+  },
+  "route_watch": {
+    "enabled": true,
+    "origin": "ICN",
+    "destination": "NRT",
+    "outbound_date": "2026-10-03",
+    "return_date": "2026-10-06",
+    "max_price": 300000,
+    "nonstop_only": true
+  },
+  "route_watches": [
+    {
+      "name": "Osaka weekend",
+      "enabled": true,
+      "origin": "ICN",
+      "destination": "KIX",
+      "outbound_date": "2026-11-06",
+      "return_date": "2026-11-08",
+      "max_price": 280000,
+      "nonstop_only": true
+    }
+  }
+}
+```
+
+`route_watches` is the v1.7 list form. Entries are evaluated in JSON order;
+invalid or expired entries are excluded without disabling valid entries. The
+v1.4 single `route_watch` object remains supported and is treated as the first
+Route Watch when enabled, so existing user configuration remains valid.
+
+PTIS selects exactly one active intent by `KST date ordinal % active intents`.
+This is deterministic, needs no saved scheduler state, and guarantees that every
+unchanged active intent receives one slot in each complete rotation. Adding or
+removing a Route Watch changes only the configured candidate list, so future
+dates remain directly predictable from that order.
+
+`focus_slot.mode` retains its existing setting names as candidate ordering:
+
+- `alternate` (default) and `route_first`: Route Watches first, then Region Focus;
+- `region_first`: Region Focus first, then Route Watches.
+
+These modes are ordering controls rather than strict priorities in v1.7. Strict
+priority would starve other active intents and is therefore not used.
+
+If only one feature is active, that feature gets the slot. If neither is active,
+the original `GMP/near` discovery task is restored.
+
+The initial `google_flights` response includes the round-trip fare for each
+outbound option. v1.4 intentionally does not send the optional
+`departure_token` follow-up request because PTIS only needs the monitored
+round-trip price at this stage. Return-flight choice details and booking-token
+lookups are outside v1.4.
+
+Route Watch results do not compete with Discovery carryover, quota, or exposure
+demotion. Kakao and Pages show the exact Route Watch label selected that day before
+Region Focus and Discovery. An invalid or expired Route Watch disables only that
+watch for the current run.
+
+## Phone-friendly trip settings
+
+You do not need to edit `user_config.json`. Open the latest PTIS Pages report or
+Kakao message and tap **여행 조건 설정**. After signing in to GitHub when needed,
+the button opens a dedicated PTIS settings form directly; you no longer need to
+open Actions and tap **Run workflow** first.
+
+The direct form supports:
+
+- adding one exact route from popular-airport choices;
+- replacing all exact-route watches with one selected route;
+- setting a region for a selected future month, stay range, and budget;
+- pausing every interest search without deleting the saved entries.
+
+The destination list includes China as a region search (`중국 전체 (China)`)
+and five exact-route airports: Shanghai (PVG), Beijing Capital (PEK),
+Beijing Daxing (PKX), Xi'an (XIY), and Qingdao (TAO). Beijing's airports are
+separate choices for exact routes.
+
+For an exact route, PTIS selects the Friday in the chosen week and calculates
+the return date from the selected stay. For a region search, PTIS searches the
+whole chosen month and turns the stay choice into a small range. Optional custom
+destination/date fields remain available for uncommon trips; most users can leave
+them blank. The direct-flight choice is ignored for region searches.
+
+Submitting the form creates a short-lived settings request in GitHub Issues.
+`.github/workflows/trip-settings-issue.yml` accepts only requests authored by the
+repository owner, validates them with the same `manage_trip_settings.py` logic,
+updates `user_config.json`, and closes the request after a successful save.
+Visitors to a public report cannot change the owner's configuration.
+
+The original **여행 조건 설정** Actions workflow remains available as an
+administrator fallback. Both paths share the same `ptis-user-config` concurrency
+group so simultaneous saves do not race. Invalid airport codes, dates, stays, or
+prices fail without changing the saved configuration. A successful save is used
+automatically by the next scheduled PTIS run.
+
+## Schedule and API budget
+
+The normal workflow still runs every day at UTC 22:00 (KST 07:00). Region Focus
+and Multi Route Watch share one replacement slot rather than adding calls, so the
+normal schedule remains about **221 calls/month** (7 daily tasks plus the weekly
+deep task) against the 235-call safety budget. v1.7 adds **0 net scheduled SerpAPI
+calls**.
+
+## Updating an installed PTIS repository
+
+PTIS v1.5 adds a protected update path for repositories that were already created
+from PTIS. Program files can follow the upstream project while personal state stays
+inside the installed repository.
+
+The update source of truth is:
+
+- upstream: `kijm32-ops/flight-bot`
+- branch: `main`
+- version: `PTIS_VERSION`
+- file policy: `.ptis/update_manifest.json`
+
+The manifest separates centrally managed program files from personal files.
+Updates never overwrite an existing:
+
+- `data/state.json`
+- `data/kakao_auth.json`
+- `user_config.json`
+
+Repository Secrets are not Git files and are not changed by the updater. A legacy
+install that does not yet have `user_config.json` receives the current disabled
+default once; after that, the file is user-owned.
+
+### Check or apply locally
+
+Read-only check:
+
+```bash
+python update_ptis.py --check
+```
+
+Apply the latest managed files to a clean working tree:
+
+```bash
+python update_ptis.py --apply
+```
+
+The updater fetches upstream once, pins the exact fetched commit, validates the
+manifest, and applies only managed files from that snapshot. It refuses a dirty
+working tree before changing files. Review `git diff --cached` before committing.
+
+### Update pull requests
+
+Installed repositories that already contain v1.5 run **PTIS Update Check** (daily from v1.10.4)
+and can also run it manually from Actions. When a newer PTIS version exists, the
+workflow creates an update branch and attempts to open a pull request. Nothing is
+merged automatically.
+
+GitHub may require the repository setting that allows GitHub Actions to create
+pull requests. If that permission is disabled, the workflow still pushes the
+update branch and prints a warning so the owner can open the PR manually.
+
+GitHub never lets the default `GITHUB_TOKEN` push changes under
+`.github/workflows`, and most PTIS updates touch workflow files. Starting with
+v1.10.4, when that push is rejected the workflow opens an issue titled
+**PTIS update vX.Y.Z needs a manual apply** instead of failing silently. Apply it
+locally with `python update_ptis.py --apply`, then commit and push. To make updates
+fully automatic, add a repository secret named `PTIS_UPDATE_TOKEN` containing a
+fine-grained personal access token for that repository with Contents, Pull requests
+and Workflows read/write access; the workflow uses it automatically when present.
+
+For fully hands-off updates, also create the repository variable `PTIS_AUTO_MERGE`
+with the value `true` (Settings > Secrets and variables > Actions > Variables). With
+`PTIS_UPDATE_TOKEN` present, the workflow then waits for **Validate PTIS** to pass on
+the update PR and squash-merges it; a failing check leaves the PR open for review.
+
+Repositories installed before v1.5 need a one-time bootstrap update to receive
+`update_ptis.py`, the manifest, version file, and update workflow. After that,
+normal updates use the same mechanism.
 
 ## Development validation
 
 ```bash
-python -m unittest
 python -m py_compile *.py
+python -m unittest
 ```
+
+Pull requests also run **Validate PTIS**, which compiles Python, runs unit tests,
+parses workflow YAML, and checks diff whitespace without calling SerpAPI.

@@ -9,8 +9,12 @@ from config import (
     DAILY_TASK_PRIORITY, DEEP_TASK_PRIORITY, is_deep_scan_day,
     SERPAPI_SAFE_BUDGET, SERPAPI_MONTHLY_LIMIT, API_QUOTA_WARNING_THRESHOLD,
 )
-from search import fetch_raw_flight_deals
-from normalizer import normalize_and_deduplicate, collapse_by_destination, format_funnel
+from search import fetch_google_flights, fetch_raw_flight_deals
+from normalizer import (
+    normalize_and_deduplicate, collapse_by_destination, format_funnel,
+    STAGE_RAW, STAGE_BAD_DATE, STAGE_TRIP_MIN, STAGE_TRIP_MAX, STAGE_CAP,
+    STAGE_DISCOUNT, STAGE_DOMESTIC, STAGE_ERROR, STAGE_QUALIFIED,
+)
 from notifier import send_email, send_kakao_message, send_warning_email
 from report_generator import generate_report_html
 from state import (
@@ -21,22 +25,106 @@ from models import Flight
 from carryover import select_with_carryover
 from origin_compare import annotate_origin_alternatives
 from exposure import record_exposure
+from focus import FocusConfig, load_focus_config
+from route_watch import (
+    RouteWatchConfig,
+    choose_user_intent,
+    load_focus_slot_mode,
+    load_route_watch_configs,
+    route_watch_flight,
+)
 from selection import (
     TOTAL_SLOTS,
 )
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
+FOCUS_TASK = ("__FOCUS__", "focus")
+FOCUS_REPLACED_TASK = ("GMP", "near")
+FOCUS_SEARCH_FAILED = "focus_search_failed"
 
-def build_tasks(remaining_budget: int, deep_scan: bool) -> List[Tuple[str, str]]:
+FOCUS_DROP_LABELS = (
+    (STAGE_CAP, "PTIS \uAC00\uACA9 \uC0C1\uD55C"),
+    (STAGE_TRIP_MIN, "\uCCB4\uB958\uC77C \uBD80\uC871"),
+    (STAGE_TRIP_MAX, "\uCCB4\uB958\uC77C \uCD08\uACFC"),
+    (STAGE_DISCOUNT, "\uD560\uC778\uC728 \uAE30\uC900"),
+    (STAGE_DOMESTIC, "\uAD6D\uB0B4\uC120 \uCD9C\uBC1C\uC9C0 \uAE30\uC900"),
+    (STAGE_BAD_DATE, "\uB0A0\uC9DC \uC624\uB958"),
+    (STAGE_ERROR, "\uC751\uB2F5 \uCC98\uB9AC \uC624\uB958"),
+)
+
+
+def _focus_display_label(config: FocusConfig) -> str:
+    parts = [
+        f"{config.origin} \u2192 {config.region}",
+        f"{config.outbound_from}~{config.outbound_to}",
+    ]
+    if config.stay_min is not None:
+        if config.stay_min == config.stay_max:
+            parts.append(f"{config.stay_min}\uBC15")
+        else:
+            parts.append(f"{config.stay_min}~{config.stay_max}\uBC15")
+    if config.max_price is not None:
+        parts.append(f"\u2264{config.max_price:,}\uC6D0")
+    return " / ".join(parts)
+
+
+def _focus_status_text(
+    stats: Counter,
+    deal_count: int,
+    executed: bool,
+) -> str:
+    if not executed:
+        return "\uC774\uBC88 \uC2E4\uD589\uC740 API \uC608\uC0B0 \uC6B0\uC120\uC21C\uC704\uB85C \uC0DD\uB7B5\uB428"
+    if stats.get(FOCUS_SEARCH_FAILED, 0):
+        return "\uC870\uAC74\uAC80\uC0C9 \uC2E4\uD589 \uC2E4\uD328 \u00B7 Actions \uB85C\uADF8 \uD655\uC778 \uD544\uC694"
+
+    raw = stats.get(STAGE_RAW, 0)
+    if raw == 0:
+        return "\uC870\uAC74\uAC80\uC0C9 \uC2E4\uD589\uB428 \u00B7 \uD6C4\uBCF4 0\uAC74"
+
+    parts = [f"\uC870\uAC74\uAC80\uC0C9 \uC2E4\uD589\uB428 \u00B7 \uD6C4\uBCF4 {raw}\uAC74"]
+    drops = [
+        f"{label} {stats.get(stage, 0)}\uAC74"
+        for stage, label in FOCUS_DROP_LABELS
+        if stats.get(stage, 0)
+    ]
+    if drops:
+        parts.append("\uC81C\uC678 " + ", ".join(drops))
+
+    qualified = stats.get(STAGE_QUALIFIED, 0)
+    if qualified:
+        parts.append(f"1\uCC28 \uD1B5\uACFC {qualified}\uAC74")
+    parts.append(f"\uCD5C\uC885 \uC801\uD569 {deal_count}\uAC74")
+    return " \u00B7 ".join(parts)
+
+
+def _task_label(task: Tuple[str, str]) -> str:
+    return "FOCUS" if task == FOCUS_TASK else f"{task[0]}/{task[1]}"
+
+
+def build_tasks(
+    remaining_budget: int,
+    deep_scan: bool,
+    focus_active: bool = False,
+) -> List[Tuple[str, str]]:
     candidates = list(DAILY_TASK_PRIORITY)
+    if focus_active:
+        try:
+            index = candidates.index(FOCUS_REPLACED_TASK)
+        except ValueError:
+            logging.error("Focus Search replacement slot is missing; Focus disabled for this run.")
+        else:
+            candidates[index] = FOCUS_TASK
+
     if deep_scan:
         candidates += DEEP_TASK_PRIORITY
 
     valid = [
         (origin, profile)
         for origin, profile in candidates
-        if profile in ORIGIN_PROFILES.get(origin, [])
+        if (origin, profile) == FOCUS_TASK
+        or profile in ORIGIN_PROFILES.get(origin, [])
     ]
 
     if remaining_budget >= len(valid):
@@ -47,7 +135,7 @@ def build_tasks(remaining_budget: int, deep_scan: bool) -> List[Tuple[str, str]]
     if dropped:
         logging.warning(
             f"\u26A0\uFE0F \uC608\uC0B0 \uBD80\uC871\uC73C\uB85C {len(dropped)}\uAC1C \uC791\uC5C5 \uC0DD\uB7B5: "
-            + ", ".join(f"{o}/{p}" for o, p in dropped)
+            + ", ".join(_task_label(task) for task in dropped)
         )
     return trimmed
 
@@ -81,6 +169,53 @@ def process_profile(origin: str, profile_name: str) -> Tuple[List[Flight], Count
         return [], stats
 
 
+def process_focus(config: FocusConfig) -> Tuple[List[Flight], Counter]:
+    stats: Counter = Counter()
+    try:
+        raw_deals = fetch_raw_flight_deals(
+            SERPAPI_KEY,
+            config.search_params(),
+            config.origin,
+        )
+        if not raw_deals:
+            logging.info("[FOCUS] no raw deals returned.")
+            return [], stats
+
+        flights = normalize_and_deduplicate(config.origin, raw_deals, stats)
+        flights = [flight for flight in flights if config.matches(flight)]
+        flights.sort(key=lambda flight: (flight.price, flight.value_ratio))
+        logging.info(
+            "[FOCUS] %d normalized matches. funnel: %s",
+            len(flights),
+            format_funnel(stats),
+        )
+        return flights, stats
+    except Exception as exc:
+        stats[FOCUS_SEARCH_FAILED] += 1
+        logging.error("[FOCUS] FAILED: %s", exc)
+        return [], stats
+
+
+def process_route_watch(config: RouteWatchConfig) -> List[Flight]:
+    try:
+        payload = fetch_google_flights(SERPAPI_KEY, config.search_params())
+        flight = route_watch_flight(config, payload)
+        if flight is None:
+            logging.info("[ROUTE] no matching fare returned.")
+            return []
+        logging.info(
+            "[ROUTE] %s %s->%s %s KRW",
+            config.outbound_date,
+            config.origin,
+            config.destination,
+            flight.price,
+        )
+        return [flight]
+    except Exception as exc:
+        logging.error("[ROUTE] FAILED: %s", exc)
+        return []
+
+
 def merge_and_collapse(flights: List[Flight]) -> List[Flight]:
     """
     Merge results from all profiles:
@@ -109,6 +244,21 @@ def run_system():
         sys.exit(1)
 
     state = load_state()
+    focus_config = load_focus_config()
+    route_configs = load_route_watch_configs()
+    focus_slot_mode = load_focus_slot_mode()
+    user_intent = choose_user_intent(
+        focus_config,
+        route_configs,
+        focus_slot_mode,
+    )
+    if user_intent:
+        logging.info(
+            "User-intent slot: %s (%s): %s",
+            user_intent.kind,
+            focus_slot_mode,
+            user_intent.config.label,
+        )
 
     deep_scan = is_deep_scan_day()
     if deep_scan:
@@ -121,7 +271,7 @@ def run_system():
         f"{remaining} left (safe cap {SERPAPI_SAFE_BUDGET})"
     )
 
-    tasks = build_tasks(remaining, deep_scan)
+    tasks = build_tasks(remaining, deep_scan, focus_active=user_intent is not None)
 
     if not tasks:
         logging.error("Budget exhausted; skipping API calls.")
@@ -137,25 +287,59 @@ def run_system():
         save_state(state)
         return
 
-    logging.info(f"Start {len(tasks)} tasks: " + ", ".join(f"{o}/{p}" for o, p in tasks))
+    logging.info(
+        f"Start {len(tasks)} tasks: " + ", ".join(_task_label(task) for task in tasks)
+    )
     all_final_flights: List[Flight] = []
+    focus_flights: List[Flight] = []
+    route_watch_flights: List[Flight] = []
+    focus_stats: Counter = Counter()
     funnel: Counter = Counter()
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(tasks)) as executor:
-        future_to_task = {
-            executor.submit(process_profile, origin, profile): (origin, profile)
-            for origin, profile in tasks
-        }
+        future_to_task = {}
+        for origin, profile in tasks:
+            task = (origin, profile)
+            if task == FOCUS_TASK:
+                if user_intent and user_intent.kind == "route":
+                    future = executor.submit(process_route_watch, user_intent.config)
+                elif user_intent and user_intent.kind == "focus":
+                    future = executor.submit(process_focus, user_intent.config)
+                else:
+                    continue
+            else:
+                future = executor.submit(process_profile, origin, profile)
+            future_to_task[future] = task
+
         for future in concurrent.futures.as_completed(future_to_task):
-            origin, profile = future_to_task[future]
+            task = future_to_task[future]
             try:
-                flights, stats = future.result()
-                all_final_flights.extend(flights)
-                funnel.update(stats)
+                result = future.result()
+                if task == FOCUS_TASK and user_intent and user_intent.kind == "route":
+                    route_watch_flights.extend(result)
+                elif task == FOCUS_TASK:
+                    flights, stats = result
+                    focus_flights.extend(flights)
+                    focus_stats.update(stats)
+                    funnel.update(stats)
+                else:
+                    flights, stats = result
+                    all_final_flights.extend(flights)
+                    funnel.update(stats)
             except Exception as exc:
-                logging.error(f"[{origin} / {profile}] thread error: {exc}")
+                logging.error("[%s] thread error: %s", _task_label(task), exc)
 
     logging.info("FUNNEL (all tasks): " + format_funnel(funnel))
+
+    focus_label = ""
+    focus_status = ""
+    if user_intent and user_intent.kind == "focus":
+        focus_label = _focus_display_label(user_intent.config)
+        focus_status = _focus_status_text(
+            focus_stats,
+            len(focus_flights),
+            executed=FOCUS_TASK in tasks,
+        )
 
     carried = refresh_carryover_pool(state, all_final_flights)
     all_final_flights = merge_and_collapse(all_final_flights)
@@ -171,7 +355,12 @@ def run_system():
 
     record_exposure(state, all_final_flights)
 
-    logging.info(f"Done. {len(all_final_flights)} deals collected.")
+    logging.info(
+        "Done. %d discovery, %d focus, %d route-watch deals collected.",
+        len(all_final_flights),
+        len(focus_flights),
+        len(route_watch_flights),
+    )
 
     low_price_keys = update_route_history(state, [f for f in all_final_flights if not f.is_carryover])
     if low_price_keys:
@@ -187,11 +376,30 @@ def run_system():
             f"\uC548\uC804 \uC608\uC0B0 {SERPAPI_SAFE_BUDGET}\uD68C)."
         )
 
-    generate_report_html(all_final_flights, KAKAO_JS_KEY, low_price_keys)
+    generate_report_html(
+        all_final_flights,
+        KAKAO_JS_KEY,
+        low_price_keys,
+        focus_deals=focus_flights,
+        focus_label=focus_label,
+        focus_status=focus_status,
+        route_watch_deals=route_watch_flights,
+        route_watch_label=user_intent.config.label if user_intent and user_intent.kind == "route" else "",
+    )
 
-    if all_final_flights:
-        send_email(all_final_flights, low_price_keys)
-        kakao_success = send_kakao_message(all_final_flights)
+    if all_final_flights or focus_flights or route_watch_flights:
+        send_email(
+            route_watch_flights + focus_flights + all_final_flights,
+            low_price_keys,
+        )
+        kakao_success = send_kakao_message(
+            all_final_flights,
+            focus_deals=focus_flights,
+            focus_label=focus_label,
+            focus_status=focus_status,
+            route_watch_deals=route_watch_flights,
+            route_watch_label=user_intent.config.label if user_intent and user_intent.kind == "route" else "",
+        )
         need_warning = record_kakao_result(state, kakao_success)
         if need_warning:
             send_warning_email(
