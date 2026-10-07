@@ -8,7 +8,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from config import (
     GMAIL_USER, GMAIL_PASSWORD, KAKAO_CARD_IMAGE_URL, KAKAO_CLIENT_SECRET,
-    KAKAO_REST_API_KEY, KAKAO_TOKEN_ENCRYPTION_KEY, PAGE_URL,
+    KAKAO_REST_API_KEY, KAKAO_TOKEN_ENCRYPTION_KEY, PAGE_URL, TRIP_SETTINGS_URL,
 )
 from kakao_auth import KakaoAuthError, load_refresh_token, store_refresh_token
 from models import Flight
@@ -190,12 +190,27 @@ def refresh_kakao_access_token() -> str:
     return access_token
 
 
-def send_kakao_message(deals: List[Flight]) -> bool:
+def send_kakao_message(
+    deals: List[Flight],
+    focus_deals: List[Flight] = None,
+    focus_label: str = "",
+    focus_status: str = "",
+    route_watch_deals: List[Flight] = None,
+    route_watch_label: str = "",
+) -> bool:
     """
     카카오톡 '나에게 보내기'로 특가 요약 알림 발송.
     성공 여부를 True/False로 반환한다 (연속 실패 감지에 사용).
     """
-    if not deals:
+    focus_deals = focus_deals or []
+    route_watch_deals = route_watch_deals or []
+    if (
+        not deals
+        and not focus_deals
+        and not route_watch_deals
+        and not focus_label
+        and not focus_status
+    ):
         return True  # 보낼 게 없는 것은 실패가 아님
 
     if not PAGE_URL or not KAKAO_CARD_IMAGE_URL:
@@ -209,24 +224,63 @@ def send_kakao_message(deals: List[Flight]) -> bool:
         logging.error(f"❌ 카카오 Access Token 갱신 실패: {e}")
         return False
 
-    # 2단계: 상위 3건 요약 + 전체 목록 페이지 링크 구성
-    # (main.py에서 value_ratio 오름차순 정렬되므로 상위 3건 = 가성비 최상위)
-    top_deals = deals[:3]
+    # 2단계: Route Watch -> Region Focus -> Discovery 순으로 최대 3건 요약한다.
     summary_lines = []
-    for d in top_deals:
+
+    if focus_label and not focus_deals:
+        summary_lines.append(f"\U0001F3AF {focus_label}")
+        if focus_status:
+            summary_lines.append(f"\u21B3 {focus_status}")
+
+    for d in route_watch_deals[:1]:
+        nights = (d.return_date - d.depart_date).days
+        summary_lines.append(
+            f"\U0001F4CD {d.origin}\u2192{_short_name(d)} {d.price:,}\uC6D0 "
+            f"{d.depart_date.strftime('%m/%d')} {nights}\uBC15{nights+1}\uC77C"
+        )
+
+    remaining = max(0, 3 - len(summary_lines))
+    for d in focus_deals[:remaining]:
+        nights = (d.return_date - d.depart_date).days
+        summary_lines.append(
+            f"\U0001F3AF {d.origin}\u2192{_short_name(d)} {d.price:,}\uC6D0 "
+            f"{d.depart_date.strftime('%m/%d')} {nights}\uBC15{nights+1}\uC77C"
+        )
+
+    remaining = max(0, 3 - len(summary_lines))
+    for d in deals[:remaining]:
         nights = (d.return_date - d.depart_date).days
         grade = d.value_grade.split(" ")[0] if d.value_grade and d.value_grade != "unknown" else ""
         summary_lines.append(
-            f"{grade}{d.origin}→{_short_name(d)} {d.price:,}원 "
+            f"\U0001F50E {grade}{d.origin}\u2192{_short_name(d)} {d.price:,}\uC6D0 "
             f"{d.carryover_label} "
-            f"{d.depart_date.strftime('%m/%d')} {nights}박{nights+1}일"
+            f"{d.depart_date.strftime('%m/%d')} {nights}\uBC15{nights+1}\uC77C"
         )
+
+    if route_watch_label:
+        route_label = f" ({route_watch_label})" if route_watch_label else ""
+        title = (
+            f"\u2708\uFE0F \uB178\uC120\uAC10\uC2DC{route_label} {len(route_watch_deals)}\uAC74"
+            f" \u00B7 \uAD00\uC2EC\uAC80\uC0C9 {len(focus_deals)}\uAC74"
+            f" \u00B7 \uD2B9\uAC00 {len(deals)}\uAC74"
+        )
+    elif focus_deals or focus_label:
+        title = (
+            f"\u2708\uFE0F \uAD00\uC2EC\uAC80\uC0C9 {len(focus_deals)}\uAC74"
+            f" \u00B7 \uD2B9\uAC00 {len(deals)}\uAC74"
+        )
+    else:
+        title = (
+            f"\u2708\uFE0F \uC624\uB298\uC758 \uD2B9\uAC00 \uD56D\uACF5\uAD8C "
+            f"{len(deals)}\uAC74 \uBC1C\uACAC!"
+        )
+
     description_text = "\n".join(summary_lines)
 
     template_object = {
         "object_type": "feed",
         "content": {
-            "title": f"✈️ 오늘의 특가 항공권 {len(deals)}건 발견!",
+            "title": title,
             "description": description_text,
             "image_url": KAKAO_CARD_IMAGE_URL,
             "image_width": KAKAO_CARD_IMAGE_WIDTH,
@@ -246,6 +300,16 @@ def send_kakao_message(deals: List[Flight]) -> bool:
             }
         ],
     }
+    if TRIP_SETTINGS_URL:
+        template_object["buttons"].append(
+            {
+                "title": "\uC5EC\uD589 \uC870\uAC74 \uC124\uC815",
+                "link": {
+                    "web_url": TRIP_SETTINGS_URL,
+                    "mobile_web_url": TRIP_SETTINGS_URL,
+                },
+            }
+        )
 
     # 3단계: 나에게 보내기 API 호출
     try:

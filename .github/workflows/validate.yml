@@ -1,0 +1,60 @@
+name: Validate PTIS
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyyaml
+
+      - name: Compile Python sources
+        run: python -m py_compile *.py
+
+      - name: Run unit tests
+        run: python -m unittest
+
+      - name: Parse GitHub YAML
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import yaml
+
+          paths = [
+              *Path('.github/workflows').glob('*.yml'),
+              *Path('.github/ISSUE_TEMPLATE').glob('*.yml'),
+          ]
+          for path in sorted(paths):
+              with path.open(encoding='utf-8') as handle:
+                  yaml.safe_load(handle)
+              print(f'parsed {path}')
+          PY
+
+      - name: Build clean template
+        run: |
+          python build_template.py --output /tmp/ptis-template
+          test -f /tmp/ptis-template/.github/ISSUE_TEMPLATE/trip-settings.yml
+          test -f /tmp/ptis-template/.github/workflows/trip-settings-issue.yml
+
+      - name: Check diff whitespace
+        if: github.event_name == 'pull_request'
+        run: git diff --check "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}"
